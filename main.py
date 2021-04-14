@@ -40,7 +40,9 @@ if not args.camera and not args.video:
     print("-stream, Stream video over network on port 8090")
     print("-record, Record output to file (only works if using camera as source)")
     print("-preview, Onscreen Preview\n")
-    print("Sample Usage: python3 main.py -vid samplevideo.mp4")
+    print("Sample Usage: python3 main.py -vid samplevideo.mp4\n")
+    print("To view the recording, convert the stream file (.h264/.h265) into a video file (.mp4):")
+    print("ffmpeg -framerate 30 -i <input.h264> -c copy <output.mp4>")
     quit()
 
 ## Start Web Streaming Stuff
@@ -111,6 +113,13 @@ def create_pipeline():
         cam_xout = pipeline.createXLinkOut()
         cam_xout.setStreamName("cam_out")
         cam.preview.link(cam_xout.input)
+        if args.record:
+            ve = pipeline.createVideoEncoder()
+            ve.setDefaultProfilePreset(1920, 1080, 30, dai.VideoEncoderProperties.Profile.H264_MAIN)
+            cam.video.link(ve.input)
+            veOut = pipeline.createXLinkOut()
+            veOut.setStreamName('veOut')
+            ve.bitstream.link(veOut.input)
 
     # NeuralNetwork
     print("Creating Vehicle Detection Neural Network...")
@@ -267,6 +276,8 @@ with dai.Device(create_pipeline()) as device:
     device.startPipeline()
     if args.camera:
         cam_out = device.getOutputQueue("cam_out", 1, True)
+        if args.record: 
+            outQ = device.getOutputQueue(name='veOut', maxSize=30, blocking=True)
     else:
         veh_in = device.getInputQueue("veh_in")
     attr_in = device.getInputQueue("attr_in")
@@ -312,9 +323,21 @@ with dai.Device(create_pipeline()) as device:
     textcaution_hpos = caution_hpos + 40
     right_textcaution_wpos = right_caution_wpos - 35
 
+    if args.record:
+        filename="video"+str(int(time.time() * 10000))+".h264"
+        print("Writing to: "+filename)
+        print("Convert to MP4 as follows")
+        print("ffmpeg -framerate 30 -i "+filename+" -c copy "+filename+".mp4>")
+        videoH264 = open(filename, 'wb') 
+
     try:
         while should_run():
             read_correctly, frame = get_frame()
+
+            # Empty each queue
+            if args.record:
+                while outQ.has():
+                    outQ.get().getData().tofile(videoH264)
 
             if not read_correctly:
                 break
