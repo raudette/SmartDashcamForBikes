@@ -6,13 +6,20 @@ import argparse
 import threading
 import time
 from pathlib import Path
-
+import json
+import socketserver
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+#import io
+from io import BytesIO 
+from socketserver import ThreadingMixIn
+from time import sleep
+from PIL import Image
 import cv2
 import depthai as dai
 import numpy as np
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-nd', '--no-debug', action="store_true", help="Prevent debug output")
 parser.add_argument('-cam', '--camera', action="store_true",
                     help="Use DepthAI 4K RGB camera for inference (conflicts with -vid)")
 parser.add_argument('-vid', '--video', type=str,
@@ -21,17 +28,54 @@ parser.add_argument('-stream', '--stream', action="store_true",
                     help="Stream output over network")
 parser.add_argument('-record', '--record', action="store_true",
                     help="Record output to video file")
-parser.add_argument('-np', '--nopreview', action="store_true",
+parser.add_argument('-preview', '--preview', action="store_true",
                     help="record output")
 args = parser.parse_args()
 
 if not args.camera and not args.video:
-    raise RuntimeError(
-        "No source selected. Use either \"-cam\" to run on RGB camera as a source or \"-vid <path>\" to run on video"
-    )
+    print("main.py - SmartDashcamForBikes\n")
+    print("Arguments:")
+    print("-cam, Use camera as source")
+    print("-vid <filename>, Specify test file as source")
+    print("-stream, Stream video over network on port 8090")
+    print("-record, Record output to file (only works if using camera as source)")
+    print("-preview, Onscreen Preview\n")
+    print("Sample Usage: python3 main.py -vid samplevideo.mp4")
+    quit()
 
-debug = not args.no_debug
+## Start Web Streaming Stuff
 
+# HTTPServer MJPEG
+class VideoStreamHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--jpgboundary')
+        self.end_headers()
+        while True:
+            sleep(0.1)
+            if hasattr(self.server, 'frametosend'):
+                image = Image.fromarray(cv2.cvtColor(self.server.frametosend, cv2.COLOR_BGR2RGB))
+                stream_file = BytesIO()
+                image.save(stream_file, 'JPEG')
+                self.wfile.write("--jpgboundary".encode())
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-length', str(stream_file.getbuffer().nbytes))
+                self.end_headers()
+                image.save(self.wfile, 'JPEG')
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in a separate thread."""
+    pass
+
+if args.stream:
+    print("Streaming video on http://localhost:8090/ - works with Chrome browser")
+    # start MJPEG HTTP Server
+    server_HTTP = ThreadedHTTPServer(('', 8090), VideoStreamHandler)
+    th2 = threading.Thread(target=server_HTTP.serve_forever)
+    th2.daemon = True
+    th2.start()
+
+## End web streaming stuff
 
 def cos_dist(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -160,38 +204,6 @@ else:
     fps = FPSHandler(cap)
 
 
-def lic_thread(det_queue, det_pass, rec_queue):
-    global license_detections, lic_last_seq
-
-    while running:
-        try:
-            in_det = det_queue.get().detections
-            in_pass = det_pass.get()
-
-            orig_frame = frame_seq_map.get(in_pass.getSequenceNum(), None)
-            if orig_frame is None:
-                continue
-
-            license_detections = [detection for detection in in_det if detection.label == 2]
-
-            for detection in license_detections:
-                bbox = frame_norm(orig_frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
-                cropped_frame = orig_frame[bbox[1]:bbox[3], bbox[0]:bbox[2]]
-
-                tstamp = time.monotonic()
-                img = dai.ImgFrame()
-                img.setTimestamp(tstamp)
-                img.setType(dai.RawImgFrame.Type.BGR888p)
-                img.setData(to_planar(cropped_frame, (94, 24)))
-                img.setWidth(94)
-                img.setHeight(24)
-                rec_queue.send(img)
-
-            fps.tick('lic')
-        except RuntimeError:
-            continue
-
-
 def veh_thread(det_queue, det_pass, attr_queue):
     global vehicle_detections, veh_last_seq
 
@@ -288,6 +300,17 @@ with dai.Device(create_pipeline()) as device:
 
             return True, frame
 
+    #try once before we start stream to get dimensions
+    frame = get_frame()[1]
+    height = frame.shape[0]
+    width = frame.shape[1]
+    halfwidth = int(width/2)
+    left_caution_wpos = int(width * 0.09)
+    caution_hpos = int(height * 0.83)
+    right_caution_wpos = width - int(width*0.09)
+    left_textcaution_wpos = left_caution_wpos - 35
+    textcaution_hpos = caution_hpos + 40
+    right_textcaution_wpos = right_caution_wpos - 35
 
     try:
         while should_run():
@@ -315,45 +338,33 @@ with dai.Device(create_pipeline()) as device:
                 veh_frame.setHeight(384)
                 veh_in.send(veh_frame)
 
-            if debug:
-                debug_frame = frame.copy()
-                leftcar = False
-                rightcar = False
-                for detection in license_detections + vehicle_detections:
-                    bbox = frame_norm(debug_frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
-                    cv2.rectangle(debug_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 0), 2)
-                    # Here is where I check if a car is detected on the right side or left side
-                    if (bbox[0] > 336): 
-                        rightcar = True
+            bikecam_frame = frame.copy()
+            leftcar = False
+            rightcar = False
 
-                    if (bbox[2] < 336):
-                        leftcar = True
-                debug_frame = cv2.flip(debug_frame,1)
+            for detection in license_detections + vehicle_detections:
+                bbox = frame_norm(bikecam_frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
+                cv2.rectangle(bikecam_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 0), 2)
+                # Here is where I check if a car is detected on the right side or left side
+                if (bbox[0] > halfwidth): 
+                    rightcar = True
 
-                if rightcar:
-                    cv2.circle(debug_frame,(60,320), 20, (2,210,238), -1)
-                    cv2.putText(debug_frame, f"CAUTION", (25, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (2,210,238))
+                if (bbox[2] <= halfwidth):
+                    leftcar = True
+            bikecam_frame = cv2.flip(bikecam_frame,1)
+            if args.stream:
+                server_HTTP.frametosend = bikecam_frame
 
-                if leftcar:
-                    cv2.circle(debug_frame,(612,320), 20, (2,210,238), -1)
-                    cv2.putText(debug_frame, f"CAUTION", (580, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (2,210,238))
+            if rightcar:
+                cv2.circle(bikecam_frame,(left_caution_wpos,caution_hpos), 20, (2,210,238), -1)
+                cv2.putText(bikecam_frame, f"CAUTION", (left_textcaution_wpos, textcaution_hpos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (2,210,238))
 
-                cv2.imshow("rgb", debug_frame)
-                attr_stacked = None
+            if leftcar:
+                cv2.circle(bikecam_frame,(right_caution_wpos,caution_hpos), 20, (2,210,238), -1)
+                cv2.putText(bikecam_frame, f"CAUTION", (right_textcaution_wpos, textcaution_hpos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (2,210,238))
 
-                for attr_img, attr_color, attr_type, color_prob, type_prob in attr_results:
-                    attr_placeholder_img = np.zeros((72, 200, 3), np.uint8)
-                    cv2.putText(attr_placeholder_img, attr_color, (15, 30), cv2.FONT_HERSHEY_TRIPLEX, 0.5, (0, 255, 0))
-                    cv2.putText(attr_placeholder_img, attr_type, (15, 50), cv2.FONT_HERSHEY_TRIPLEX, 0.5, (0, 255, 0))
-                    cv2.putText(attr_placeholder_img, f"{int(color_prob * 100)}%", (150, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0))
-                    cv2.putText(attr_placeholder_img, f"{int(type_prob * 100)}%", (150, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0))
-                    attr_combined = np.hstack((attr_img, attr_placeholder_img))
-
-                    if attr_stacked is None:
-                        attr_stacked = attr_combined
-                    else:
-                        attr_stacked = np.vstack((attr_stacked, attr_combined))
-
+            if args.preview:
+                cv2.imshow("rgb", bikecam_frame)
                     
             key = cv2.waitKey(1)
             if key == ord('q'):
@@ -366,6 +377,6 @@ with dai.Device(create_pipeline()) as device:
 
 attr_t.join()
 veh_t.join()
-print("FPS: {:.2f}".format(fps.fps()))
+
 if not args.camera:
     cap.release()
