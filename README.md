@@ -15,11 +15,11 @@ python3 -m pip install -r requirements.txt
 Main.py - SmartDashcamForBikes
 
 Arguments:
--cam, Use camera as source
--vid <filename>, Specify test file as source
--stream, Stream video over network on port 8090
--record, Record output to file (only works if using camera as source)
--preview, Onscreen Preview
+- cam, Use camera as source
+- vid <filename>, Specify test file as source
+- stream, Stream video over network on port 8090
+- record, Record output to file (only works if using camera as source)
+- preview, Onscreen Preview
 
 Sample Usage:
 
