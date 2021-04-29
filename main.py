@@ -18,6 +18,8 @@ from PIL import Image
 import cv2
 import depthai as dai
 import numpy as np
+import subprocess as sp
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-cam', '--camera', action="store_true",
@@ -27,7 +29,9 @@ parser.add_argument('-vid', '--video', type=str,
 parser.add_argument('-stream', '--stream', action="store_true",
                     help="Stream output over network")
 parser.add_argument('-record', '--record', action="store_true",
-                    help="Record output to video file")
+                    help="Record raw camera footage to video file")
+parser.add_argument('-saveoutput', '--saveoutput', action="store_true",
+                    help="Save processed video output")
 parser.add_argument('-preview', '--preview', action="store_true",
                     help="record output")
 args = parser.parse_args()
@@ -38,8 +42,9 @@ if not args.camera and not args.video:
     print("-cam, Use camera as source")
     print("-vid <filename>, Specify test file as source")
     print("-stream, Stream video over network on port 8090")
-    print("-record, Record output to file (only works if using camera as source)")
+    print("-record, Record raw camera footage to video file (only works if using camera as source)")
     print("-preview, Onscreen Preview\n")
+    print("-saveoutput, Save processed video output\n")
     print("Sample Usage: python3 main.py -vid samplevideo.mp4\n")
     print("To view the recording, convert the stream file (.h264/.h265) into a video file (.mp4):")
     print("ffmpeg -framerate 30 -i <input.h264> -c copy <output.mp4>")
@@ -323,6 +328,12 @@ with dai.Device(create_pipeline()) as device:
     textcaution_hpos = caution_hpos + 40
     right_textcaution_wpos = right_caution_wpos - 35
 
+    if args.saveoutput:
+        #command = ['myapp', '--arg1', 'value_for_arg1']
+        command = ['/usr/bin/ffmpeg', '-y', '-f','image2pipe','-r','30','-i','pipe:','-codec','copy','ProcessedVideo.avi']
+#        process = sp.Popen('/usr/bin/ffmpeg -y -f image2pipe -r 30 -i pipe: -codec copy ProcessedVideo.avi', stdin=sp.PIPE)
+        process = sp.Popen(command, stdin=sp.PIPE)
+
     if args.record:
         filename="video"+str(int(time.time() * 10000))+".h264"
         print("Writing to: "+filename)
@@ -388,7 +399,11 @@ with dai.Device(create_pipeline()) as device:
 
             if args.preview:
                 cv2.imshow("rgb", bikecam_frame)
-                    
+            
+            if args.saveoutput:
+                _, jpeg_img = cv2.imencode('.JPEG', bikecam_frame)
+                process.stdin.write(jpeg_img)
+
             key = cv2.waitKey(1)
             if key == ord('q'):
                 break
